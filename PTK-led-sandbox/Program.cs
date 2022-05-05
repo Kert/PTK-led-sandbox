@@ -1,34 +1,92 @@
 ﻿using System;
+using HidSharp;
+using System.Linq;
+using System.Threading.Tasks;
+using Accord.Imaging.Filters;
+using Accord.Video.FFMPEG;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 
 namespace PTK_led_sandbox
 {
-    class Program
+    internal class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
-            int displayChunk = 0;
-            bool surveyCompleted = false;
-            do
-            {
-                Console.WriteLine("Which LED display to set image for? 1 or 2 (top or bottom)");
-                string answer = Console.ReadLine();
-                if (answer == "1")
+            // find ptk-1240
+            HidDevice tablet = Array.Find(DeviceList.Local.GetHidDevices().ToArray(),
+                delegate (HidDevice d)
                 {
-                    displayChunk = 0;
-                    surveyCompleted = true;
+                    return d.ProductID == 187 && d.VendorID == 1386 && d.MaxFeatureReportLength > 0;
                 }
-                else if (answer == "2")
-                {
-                    displayChunk = 4;
-                    surveyCompleted = true;
-                }
-            } while (!surveyCompleted);
+            );
 
+            if (tablet == null)
+            {
+                Console.WriteLine("Failed to find PTK-1240");
+                return;
+            }
+
+            HidStream hidStream;
+            if (tablet.TryOpen(out hidStream))
+            {
+                Console.WriteLine("Opened device.");
+                using (var vFReader = new VideoFileReader())
+                {
+                    var writer = new VideoFileWriter();
+                    vFReader.Open("anime-walking-gif-14.gif");
+                    while (true)
+                    {
+                        Bitmap frame = vFReader.ReadVideoFrame();
+                        if (frame == null)
+                        {
+                            frame = vFReader.ReadVideoFrame(0);
+                            //break;
+                        }
+
+                        //frame.Save("input.bmp", ImageFormat.Bmp);
+
+                        BaseResizeFilter rfilter = new ResizeNearestNeighbor(64, 128);
+                        Grayscale gfilter = Grayscale.CommonAlgorithms.BT709;
+                        frame = rfilter.Apply(frame);
+                        frame = gfilter.Apply(frame);
+
+                        // formatting to 4bpp
+                        Bitmap targetBmp = frame.Clone(new Rectangle(0, 0, frame.Width, frame.Height), System.Drawing.Imaging.PixelFormat.Format4bppIndexed);
+                        //targetBmp.Save("output.bmp", ImageFormat.Bmp);
+
+                        System.IO.MemoryStream stream = new System.IO.MemoryStream();
+                        targetBmp.Save(stream, ImageFormat.Bmp);
+                        stream.Seek(118, SeekOrigin.Begin);
+                        byte[] bmp = stream.ToArray();
+                        byte[,] features = convert_bmp(0, bmp);
+                        for (int i = 0; i < features.GetLength(0); i++)
+                        {
+                            byte[] row = Enumerable.Range(0, features.GetUpperBound(1) + 1)
+                              .Select(j => features[i, j])
+                              .ToArray();
+
+                            //Console.WriteLine(Convert.ToBase64String(row));
+
+                            hidStream.SetFeature(row);
+                        }
+                    }
+                    vFReader.Close();
+                }
+            }
+            else
+            {
+                Console.WriteLine("Failed to open device.");
+            }
+        }
+
+        static byte[,] convert_bmp(int displayChunk, byte[] bmpFile)
+        {
             const int headerOffset = 118;
             const int LENGTH = 64;
-            const int HEIGTH = 32 * 4;        
+            const int HEIGTH = 32 * 4;
 
-            byte[] bmpFile = System.IO.File.ReadAllBytes("led.bmp");
             byte[] imgData = new ArraySegment<byte>(bmpFile, headerOffset, bmpFile.Length - headerOffset).ToArray();
 
             // flipping stuff because in bmp file it's stored in reverse 
@@ -87,18 +145,19 @@ namespace PTK_led_sandbox
 
 
             const int MAX_CHUNK_SIZE = 512;
-            byte[] initString = new byte[256 + 3];            
-            int initStringIndex = 0;
-            string fileOutputStr = "";
+
+            byte[,] features = new byte[16, 256 + 3];
+
             int displayChunkBlock = 0;
+            int featureIndex = 0;
+            int currentByte = 0;
             for (int i = 0; i < LENGTH * HEIGTH; i++)
             {
                 if (!Convert.ToBoolean(i % MAX_CHUNK_SIZE))
                 {
                     if (i > 0)
                     {
-                        fileOutputStr += '\"' + Convert.ToBase64String(initString) + "\"," + Environment.NewLine;
-                        Array.Clear(initString, 0, initString.Length);
+                        featureIndex++;
                     }
 
                     if (displayChunkBlock > 3)
@@ -107,27 +166,23 @@ namespace PTK_led_sandbox
                         displayChunkBlock = 0;
                     }
 
-                    initString[0] = 0x23;
-                    initString[1] = (byte)displayChunk;
-                    initString[2] = (byte)displayChunkBlock;
-                    initStringIndex = 3;
+                    features[featureIndex, 0] = 0x23;
+                    features[featureIndex, 1] = (byte)displayChunk;
+                    features[featureIndex, 2] = (byte)displayChunkBlock;
+                    currentByte = 3;
                     displayChunkBlock++;
                 }
                 if (!Convert.ToBoolean(i % 2))
                 {
-                    initString[initStringIndex] = (byte)((convertedImg[i] << 4) & 0xF0);
-                    initStringIndex++;
+                    features[featureIndex, currentByte] = (byte)((convertedImg[i] << 4) & 0xF0);
+                    currentByte++;
                 }
                 else
                 {
-                    initString[initStringIndex - 1] |= convertedImg[i];
+                    features[featureIndex, currentByte - 1] |= convertedImg[i];
                 }
             }
-
-            fileOutputStr += '\"' + Convert.ToBase64String(initString) + "\"," + Environment.NewLine;
-            System.IO.File.WriteAllText("inits.txt", fileOutputStr);
-
-            return;
+            return features;
         }
     }
 }
