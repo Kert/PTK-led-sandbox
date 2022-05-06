@@ -2,11 +2,13 @@
 using HidSharp;
 using System.Linq;
 using System.Threading.Tasks;
+using Accord.Imaging;
 using Accord.Imaging.Filters;
 using Accord.Video.FFMPEG;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace PTK_led_sandbox
 {
@@ -44,23 +46,43 @@ namespace PTK_led_sandbox
                             frame = vFReader.ReadVideoFrame(0);
                             //break;
                         }
+                        Color trColor = Color.White;
+                        frame.MakeTransparent(trColor);
 
                         //frame.Save("input.bmp", ImageFormat.Bmp);
 
-                        BaseResizeFilter rfilter = new ResizeNearestNeighbor(64, 128);
+                        Bitmap targetBmp = frame.Clone(PixelFormat.Format32bppArgb);
+                        BaseResizeFilter filter = new ResizeBilinear(64, 128);
+                        targetBmp = filter.Apply(targetBmp);
+                        // this also changes the format to 8bpp grayscale
                         Grayscale gfilter = Grayscale.CommonAlgorithms.BT709;
-                        frame = rfilter.Apply(frame);
-                        frame = gfilter.Apply(frame);
+                        targetBmp = gfilter.Apply(targetBmp);
 
-                        // formatting to 4bpp
-                        Bitmap targetBmp = frame.Clone(new Rectangle(0, 0, frame.Width, frame.Height), System.Drawing.Imaging.PixelFormat.Format4bppIndexed);
-                        //targetBmp.Save("output.bmp", ImageFormat.Bmp);
+                        var bData = targetBmp.LockBits(ImageLockMode.ReadOnly);
+                        var length = bData.Stride * bData.Height;
+                        byte[] pixelData = new byte[length];
+                        Marshal.Copy(bData.Scan0, pixelData, 0, length);
+                        targetBmp.UnlockBits(bData);
 
-                        System.IO.MemoryStream stream = new System.IO.MemoryStream();
-                        targetBmp.Save(stream, ImageFormat.Bmp);
-                        stream.Seek(118, SeekOrigin.Begin);
-                        byte[] bmp = stream.ToArray();
-                        byte[,] features = convert_bmp(0, bmp);
+                        // flip because wrong order for converter
+                        for (int p = 0; p < pixelData.Length; p += targetBmp.Width)
+                            Array.Reverse(pixelData, p, targetBmp.Width);
+                        Array.Reverse(pixelData);
+
+                        // pass this to the inits converter
+                        byte[] pixelData4bpp = new byte[4096];
+                        int c = 0;
+                        for (int i = 0; i < (pixelData.Length - 1); i += 2)
+                        {
+                            byte h = (byte)((pixelData[i + 1] >> 4) & 0x0F);
+                            byte l = (byte)((pixelData[i]) & 0xF0);
+
+                            pixelData4bpp[c] |= h;
+                            pixelData4bpp[c] |= l;
+                            c++;
+                        }
+
+                        byte[,] features = convert_bmp(0, pixelData4bpp);
                         for (int i = 0; i < features.GetLength(0); i++)
                         {
                             byte[] row = Enumerable.Range(0, features.GetUpperBound(1) + 1)
@@ -81,13 +103,10 @@ namespace PTK_led_sandbox
             }
         }
 
-        static byte[,] convert_bmp(int displayChunk, byte[] bmpFile)
+        static byte[,] convert_bmp(int displayChunk, byte[] imgData)
         {
-            const int headerOffset = 118;
             const int LENGTH = 64;
             const int HEIGTH = 32 * 4;
-
-            byte[] imgData = new ArraySegment<byte>(bmpFile, headerOffset, bmpFile.Length - headerOffset).ToArray();
 
             // flipping stuff because in bmp file it's stored in reverse 
             // flip every half of a byte
