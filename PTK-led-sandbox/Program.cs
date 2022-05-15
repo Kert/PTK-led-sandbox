@@ -151,10 +151,7 @@ namespace PTK_led_sandbox
             Graphics g = Graphics.FromImage(bitmap);
             // disable smoothing
             g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
-            var fontCollection = new PrivateFontCollection();
-            fontCollection.AddFontFile("TinyCyrillic.ttf");
-            var myCustomFont = new Font((FontFamily)fontCollection.Families[0], 4);
-
+            var myCustomFont = CustomFont.font;
             while (true)
             {
                 string line = await streamReader.ReadLineAsync();
@@ -378,6 +375,17 @@ namespace PTK_led_sandbox
                 }
             }
             return features;
+        }
+    }
+    static class CustomFont
+    {
+        private static readonly PrivateFontCollection fontCollection = new PrivateFontCollection();
+        public static readonly Font font;
+
+        static CustomFont()
+        {
+            fontCollection.AddFontFile("TinyCyrillic.ttf");
+            font = new Font((FontFamily)fontCollection.Families[0], 4);
         }
     }
 }
